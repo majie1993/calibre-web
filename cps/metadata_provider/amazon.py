@@ -57,77 +57,78 @@ class Amazon(Metadata):
     ) -> Optional[List[MetaRecord]]:
         def inner(link, index) -> [dict, int]:
             try:
+                log.debug(f"Fetching Amazon book details for link: {link}")
                 r = self.session.get(f"https://www.amazon.com/{link}", timeout=10)
                 r.raise_for_status()
             except Exception as ex:
-                log.warning(ex)
+                log.warning(f"Failed to fetch Amazon book details for link {link}: {ex}")
                 return []
             long_soup = BS(r.text, "lxml")  #~4sec :/
             soup2 = long_soup.find("div", attrs={"cel_widget_id": "dpx-ppd_csm_instrumentation_wrapper"})
             if soup2 is None:
                 return []
-                try:
-                    match = MetaRecord(
-                        title = "",
-                        authors = "",
-                        source=MetaSourceInfo(
-                            id=self.__id__,
-                            description="Amazon Books",
-                            link="https://amazon.com/"
-                        ),
-                        url = f"https://www.amazon.com{link}",
-                        #the more searches the slower, these are too hard to find in reasonable time or might not even exist
-                        publisher= "",  # very unreliable
-                        publishedDate= "",  # very unreliable
-                        id = None,  # ?
-                        tags = []  # dont exist on amazon
-                    )
+            try:
+                match = MetaRecord(
+                    title = "",
+                    authors = "",
+                    source=MetaSourceInfo(
+                        id=self.__id__,
+                        description="Amazon Books",
+                        link="https://amazon.com/"
+                    ),
+                    url = f"https://www.amazon.com{link}",
+                    #the more searches the slower, these are too hard to find in reasonable time or might not even exist
+                    publisher= "",  # very unreliable
+                    publishedDate= "",  # very unreliable
+                    id = None,  # ?
+                    tags = []  # dont exist on amazon
+                )
 
-                    try:
-                        match.description = "\n".join(
-                            soup2.find("div", attrs={"data-feature-name": "bookDescription"}).stripped_strings)\
-                                                .replace("\xa0"," ")[:-9].strip().strip("\n")
-                    except (AttributeError, TypeError):
-                        return []  # if there is no description it is not a book and therefore should be ignored
-                    try:
-                        match.title = soup2.find("span", attrs={"id": "productTitle"}).text
-                    except (AttributeError, TypeError):
-                        match.title = ""
-                    try:
-                        match.authors = [next(
-                            filter(lambda i: i != " " and i != "\n" and not i.startswith("{"),
-                                   x.findAll(string=True))).strip()
-                                        for x in soup2.findAll("span", attrs={"class": "author"})]
-                    except (AttributeError, TypeError, StopIteration):
-                        match.authors = ""
-                    try:
-                        match.rating = int(
-                            soup2.find("span", class_="a-icon-alt").text.split(" ")[0].split(".")[
-                                0])  # first number in string
-                    except (AttributeError, ValueError):
-                        match.rating = 0
-                    try:
-                        match.cover = soup2.find("img", attrs={"class": "a-dynamic-image"})["src"]
-                    except (AttributeError, TypeError):
-                        match.cover = ""
-                    return match, index
-                except Exception as e:
-                    log.error_or_exception(e)
-                    return []
+                try:
+                    match.description = "\n".join(
+                        soup2.find("div", attrs={"data-feature-name": "bookDescription"}).stripped_strings)\
+                                            .replace("\xa0"," ")[:-9].strip().strip("\n")
+                except (AttributeError, TypeError):
+                    return []  # if there is no description it is not a book and therefore should be ignored
+                try:
+                    match.title = soup2.find("span", attrs={"id": "productTitle"}).text
+                except (AttributeError, TypeError):
+                    match.title = ""
+                try:
+                    match.authors = [next(
+                        filter(lambda i: i != " " and i != "\n" and not i.startswith("{"),
+                               x.findAll(string=True))).strip()
+                                    for x in soup2.findAll("span", attrs={"class": "author"})]
+                except (AttributeError, TypeError, StopIteration):
+                    match.authors = ""
+                try:
+                    match.rating = int(
+                        soup2.find("span", class_="a-icon-alt").text.split(" ")[0].split(".")[
+                            0])  # first number in string
+                except (AttributeError, ValueError):
+                    match.rating = 0
+                try:
+                    match.cover = soup2.find("img", attrs={"class": "a-dynamic-image"})["src"]
+                except (AttributeError, TypeError):
+                    match.cover = ""
+                return match, index
+            except Exception as e:
+                log.error_or_exception(e)
+                return []
 
         val = list()
         if self.active:
             try:
-                results = self.session.get(
-                    f"https://www.amazon.com/s?k={query.replace(' ', '+')}&i=digital-text&sprefix={query.replace(' ', '+')}"
-                    f"%2Cdigital-text&ref=nb_sb_noss",
-                    headers=self.headers, timeout=10)
+                search_url = f"https://www.amazon.com/s?k={query.replace(' ', '+')}&i=digital-text&sprefix={query.replace(' ', '+')}" \
+                           f"%2Cdigital-text&ref=nb_sb_noss"
+                log.debug(f"Searching Amazon for query: {query}")
+                results = self.session.get(search_url, headers=self.headers, timeout=10)
                 results.raise_for_status()
             except requests.exceptions.HTTPError as e:
-                log.error_or_exception(e)
+                log.error_or_exception(f"Amazon HTTP error for query '{query}': {e}")
                 return []
             except Exception as e:
-                log.warning(e)
+                log.warning(f"Amazon search failed for query '{query}': {e}")
                 return []
             soup = BS(results.text, 'html.parser')
             search_results = soup.findAll("div", attrs={"data-component-type": "s-search-result"})
@@ -151,6 +152,15 @@ class Amazon(Metadata):
                     val = list(map(lambda x : x.result(), concurrent.futures.as_completed(fut, timeout=15)))
                 except concurrent.futures.TimeoutError:
                     log.warning("Amazon search timeout after 15 seconds")
+                    # Cancel all remaining futures to prevent hanging
+                    for future in fut:
+                        future.cancel()
+                    val = []
+                except Exception as e:
+                    log.error_or_exception(f"Amazon ThreadPoolExecutor error: {e}")
+                    # Cancel all remaining futures to prevent hanging
+                    for future in fut:
+                        future.cancel()
                     val = []
         result = list(filter(lambda x: x, val))
         return [x[0] for x in sorted(result, key=itemgetter(1))] #sort by amazons listing order for best relevance

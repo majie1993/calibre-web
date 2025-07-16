@@ -56,17 +56,16 @@ class Amazon(Metadata):
         self, query: str, generic_cover: str = "", locale: str = "en"
     ) -> Optional[List[MetaRecord]]:
         def inner(link, index) -> [dict, int]:
-            with self.session as session:
-                try:
-                    r = session.get(f"https://www.amazon.com/{link}")
-                    r.raise_for_status()
-                except Exception as ex:
-                    log.warning(ex)
-                    return []
-                long_soup = BS(r.text, "lxml")  #~4sec :/
-                soup2 = long_soup.find("div", attrs={"cel_widget_id": "dpx-ppd_csm_instrumentation_wrapper"})
-                if soup2 is None:
-                    return []
+            try:
+                r = self.session.get(f"https://www.amazon.com/{link}", timeout=10)
+                r.raise_for_status()
+            except Exception as ex:
+                log.warning(ex)
+                return []
+            long_soup = BS(r.text, "lxml")  #~4sec :/
+            soup2 = long_soup.find("div", attrs={"cel_widget_id": "dpx-ppd_csm_instrumentation_wrapper"})
+            if soup2 is None:
+                return []
                 try:
                     match = MetaRecord(
                         title = "",
@@ -122,7 +121,7 @@ class Amazon(Metadata):
                 results = self.session.get(
                     f"https://www.amazon.com/s?k={query.replace(' ', '+')}&i=digital-text&sprefix={query.replace(' ', '+')}"
                     f"%2Cdigital-text&ref=nb_sb_noss",
-                    headers=self.headers)
+                    headers=self.headers, timeout=10)
                 results.raise_for_status()
             except requests.exceptions.HTTPError as e:
                 log.error_or_exception(e)
@@ -131,10 +130,27 @@ class Amazon(Metadata):
                 log.warning(e)
                 return []
             soup = BS(results.text, 'html.parser')
-            links_list = [next(filter(lambda i: "digital-text" in i["href"], x.findAll("a")))["href"] for x in
-                          soup.findAll("div", attrs={"data-component-type": "s-search-result"})]
+            search_results = soup.findAll("div", attrs={"data-component-type": "s-search-result"})
+            if not search_results:
+                log.warning("No search results found in Amazon response")
+                return []
+            
+            try:
+                links_list = [next(filter(lambda i: "digital-text" in i["href"], x.findAll("a")))["href"] for x in search_results]
+            except (StopIteration, AttributeError, KeyError) as e:
+                log.warning("Failed to extract links from Amazon search results: %s", e)
+                return []
+            
+            if not links_list:
+                log.warning("No digital-text links found in Amazon search results")
+                return []
+                
             with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
                 fut = {executor.submit(inner, link, index) for index, link in enumerate(links_list[:3])}
-                val = list(map(lambda x : x.result(), concurrent.futures.as_completed(fut)))
+                try:
+                    val = list(map(lambda x : x.result(), concurrent.futures.as_completed(fut, timeout=15)))
+                except concurrent.futures.TimeoutError:
+                    log.warning("Amazon search timeout after 15 seconds")
+                    val = []
         result = list(filter(lambda x: x, val))
         return [x[0] for x in sorted(result, key=itemgetter(1))] #sort by amazons listing order for best relevance
